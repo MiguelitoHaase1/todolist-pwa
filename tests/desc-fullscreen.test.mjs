@@ -20,15 +20,35 @@ import { readFileSync } from "node:fs";
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf-8");
 
 describe("Description editor — bigger default textarea + autogrow", () => {
-  it("the description textarea no longer caps at 80px min-height", () => {
-    // Find the textarea styling block — it lives inside a .modal textarea rule.
-    // Any min-height under 200px is a regression now; we expect >=240px.
+  it("the description textarea min-height is bigger than pre-ship but bounded", () => {
+    // Pre-1c375566 was 80px. First pass (1c375566) set 280px — too tall on
+    // mobile, pushing Save/Drop below the fold. Post-86f46774 tunes it to
+    // the [120, 200] window: roomy enough to read a few paragraphs without
+    // crowding out the action buttons.
     const match = html.match(/textarea\s*\{[^}]*min-height\s*:\s*(\d+)px/);
     assert.ok(match, "textarea CSS rule must specify a min-height");
     const mh = parseInt(match[1], 10);
     assert.ok(
-      mh >= 240,
-      `textarea min-height must be >= 240px for readable long descriptions (got ${mh}px)`,
+      mh >= 120 && mh <= 200,
+      `textarea min-height must be in [120, 200] px (got ${mh}px)`,
+    );
+  });
+
+  it("autogrow caps below 40% of viewport so action buttons stay reachable", () => {
+    // 1c375566 used 0.7 * innerHeight — too generous. 86f46774 caps at
+    // <= 0.4 so long content scrolls inside the textarea rather than
+    // pushing buttons below the fold.
+    const multipliers = [...html.matchAll(/innerHeight\s*\*\s*0?\.(\d+)/g)].map((m) =>
+      parseFloat("0." + m[1]),
+    );
+    assert.ok(
+      multipliers.length > 0,
+      "autogrow block must reference innerHeight * <fraction>",
+    );
+    const max = Math.max(...multipliers);
+    assert.ok(
+      max <= 0.4,
+      `autogrow cap must be <= 0.4 * innerHeight (found max ${max})`,
     );
   });
 
@@ -90,6 +110,44 @@ describe("Description editor — ⛶ Expand button opens a fullscreen modal", ()
       /getElementById\(['"]edit-description-expand['"]\)/.test(html) ||
         /['"]edit-description-expand['"][\s\S]{0,200}addEventListener/.test(html),
       "the Expand button must be wired up in the inline JS",
+    );
+  });
+});
+
+// --- Mobile-first exit from fullscreen editor (cc087344) ---
+describe("Fullscreen editor — mobile-first exit path", () => {
+  it("a persistent top-right close button exists in the fullscreen modal", () => {
+    const start = html.indexOf('id="desc-fullscreen-modal"');
+    assert.ok(start !== -1, "#desc-fullscreen-modal must render");
+    const block = html.slice(start, start + 5000);
+    assert.ok(
+      /id="desc-fullscreen-close-x"/.test(block),
+      "a top-right close button (#desc-fullscreen-close-x) must render inside the fullscreen modal",
+    );
+    assert.ok(
+      /aria-label=["'][^"']*close/i.test(block),
+      "the close button must carry an aria-label mentioning 'close'",
+    );
+  });
+
+  it("the fullscreen modal header is sticky so the close button stays visible", () => {
+    // Either position: sticky or position: fixed on the modal's header
+    // region — anything that keeps it on-screen while the content scrolls.
+    const cssStart = html.indexOf(".desc-fullscreen-modal");
+    assert.ok(cssStart !== -1, ".desc-fullscreen-modal CSS rules must exist");
+    const cssBlock = html.slice(cssStart, cssStart + 4000);
+    assert.ok(
+      /position:\s*(sticky|fixed)/i.test(cssBlock),
+      "the fullscreen modal header must use position: sticky (or fixed) so the close button stays on-screen",
+    );
+  });
+
+  it("the fullscreen modal respects iOS safe-area-inset-top", () => {
+    const cssStart = html.indexOf(".desc-fullscreen-modal");
+    const cssBlock = html.slice(cssStart, cssStart + 4000);
+    assert.ok(
+      /safe-area-inset-top/.test(cssBlock),
+      "the fullscreen header must pad by safe-area-inset-top so the close button clears the iOS notch",
     );
   });
 });

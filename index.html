@@ -422,17 +422,29 @@
 
     .field textarea {
       resize: vertical;
-      min-height: 280px;
+      min-height: 160px;
       line-height: 1.5;
     }
 
-    /* Fullscreen description editor (hypothesis 1c375566) */
+    /* Fullscreen description editor (1c375566 + mobile exit 86f46774 / cc087344) */
     .desc-fullscreen-modal {
       max-width: none; width: 100vw; height: 100vh; max-height: 100vh;
-      padding: 24px; border-radius: 0; display: flex; flex-direction: column;
+      padding: 0; border-radius: 0; display: flex; flex-direction: column;
     }
-    .desc-fullscreen-modal h2 { margin-bottom: 16px; }
-    .desc-fullscreen-modal .ds-body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    .desc-fullscreen-modal .ds-header {
+      position: sticky; top: 0; z-index: 2;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: calc(12px + env(safe-area-inset-top)) 20px 12px;
+      background: var(--bg); border-bottom: 1px solid var(--border);
+    }
+    .desc-fullscreen-modal .ds-header h2 { margin: 0; font-size: 18px; }
+    .desc-fullscreen-modal .ds-close-x {
+      background: none; border: none; color: var(--text-muted);
+      font-size: 28px; line-height: 1; cursor: pointer; padding: 4px 8px;
+      min-width: 44px; min-height: 44px;
+    }
+    .desc-fullscreen-modal .ds-close-x:hover { color: var(--coral); }
+    .desc-fullscreen-modal .ds-body { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 16px 20px; }
     .desc-fullscreen-modal textarea {
       flex: 1; min-height: 0; width: 100%; padding: 14px; font-size: 16px;
       font-family: inherit; line-height: 1.6; border: 1px solid var(--border);
@@ -683,10 +695,13 @@
   </div>
 </div>
 
-<!-- Fullscreen description editor (hypothesis 1c375566) -->
+<!-- Fullscreen description editor (1c375566 + mobile exit 86f46774 / cc087344) -->
 <div class="modal-overlay" id="desc-fullscreen-modal">
   <div class="modal desc-fullscreen-modal" role="dialog" aria-modal="true" aria-label="Fullscreen description editor">
-    <h2>Description</h2>
+    <div class="ds-header">
+      <h2>Description</h2>
+      <button class="ds-close-x" id="desc-fullscreen-close-x" type="button" aria-label="Close fullscreen editor">&times;</button>
+    </div>
     <div class="ds-body">
       <textarea id="desc-fullscreen-textarea" placeholder="Write notes, paste markdown, think out loud..."></textarea>
       <div class="ds-preview" id="desc-fullscreen-preview"></div>
@@ -1314,8 +1329,10 @@
       if (fsInner) fsInner.classList.remove('preview-mode');
     }
 
+    const closeXBtn = document.getElementById('desc-fullscreen-close-x');
     expandBtn.addEventListener('click', openFs);
     closeBtn.addEventListener('click', closeFs);
+    if (closeXBtn) closeXBtn.addEventListener('click', closeFs);
     fsModal.addEventListener('click', e => {
       if (e.target === fsModal) closeFs();
     });
@@ -1346,7 +1363,10 @@
     if (!el || !el.hasAttribute('data-autogrow')) return;
     function grow() {
       el.style.height = 'auto';
-      const maxH = Math.floor(window.innerHeight * 0.7);
+      // 86f46774: cap at 35% of viewport so Save/Drop/Cancel stay reachable;
+      // anything longer scrolls inside the textarea. Fullscreen editor is
+      // the escape hatch for real long-form edits.
+      const maxH = Math.floor(window.innerHeight * 0.35);
       const next = Math.min(el.scrollHeight + 2, maxH);
       el.style.height = next + 'px';
     }
