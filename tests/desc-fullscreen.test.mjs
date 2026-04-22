@@ -17,7 +17,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const html = readFileSync(new URL("index.html", import.meta.url), "utf-8");
+const html = readFileSync(new URL("../index.html", import.meta.url), "utf-8");
 
 describe("Description editor — bigger default textarea + autogrow", () => {
   it("the description textarea no longer caps at 80px min-height", () => {
@@ -69,21 +69,19 @@ describe("Description editor — ⛶ Expand button opens a fullscreen modal", ()
   });
 
   it("the fullscreen modal contains a textarea and a Preview toggle", () => {
-    const modalMatch = html.match(
-      /id="desc-fullscreen-modal"[\s\S]{0,4000}?<\/div>\s*<\/div>/,
-    );
-    assert.ok(modalMatch, "#desc-fullscreen-modal block must be parseable");
-    const block = modalMatch[0];
+    // The fullscreen modal has nested divs, so take a 5k-char window from the
+    // opening marker — this window is roomy enough to carry the textarea AND
+    // the footer-level Preview/Edit toggle button.
+    const start = html.indexOf('id="desc-fullscreen-modal"');
+    assert.ok(start !== -1, "#desc-fullscreen-modal must render");
+    const block = html.slice(start, start + 5000);
     assert.ok(
       /<textarea/.test(block),
       "the fullscreen modal must contain a textarea for editing",
     );
-    // The edit ↔ preview toggle button. We look for any button inside the
-    // fullscreen modal whose label or id references "preview" or "toggle".
     assert.ok(
-      /id="desc-fullscreen-toggle"/.test(block) ||
-        /<button[^>]*preview/i.test(block),
-      "the fullscreen modal must expose a Preview/Edit toggle button",
+      /id="desc-fullscreen-toggle"/.test(block),
+      "the fullscreen modal must expose a Preview/Edit toggle (#desc-fullscreen-toggle)",
     );
   });
 
