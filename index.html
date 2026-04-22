@@ -422,9 +422,34 @@
 
     .field textarea {
       resize: vertical;
-      min-height: 80px;
+      min-height: 280px;
       line-height: 1.5;
     }
+
+    /* Fullscreen description editor (hypothesis 1c375566) */
+    .desc-fullscreen-modal {
+      max-width: none; width: 100vw; height: 100vh; max-height: 100vh;
+      padding: 24px; border-radius: 0; display: flex; flex-direction: column;
+    }
+    .desc-fullscreen-modal h2 { margin-bottom: 16px; }
+    .desc-fullscreen-modal .ds-body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    .desc-fullscreen-modal textarea {
+      flex: 1; min-height: 0; width: 100%; padding: 14px; font-size: 16px;
+      font-family: inherit; line-height: 1.6; border: 1px solid var(--border);
+      border-radius: 8px; resize: none; outline: none;
+    }
+    .desc-fullscreen-modal textarea:focus { border-color: var(--coral); }
+    .desc-fullscreen-modal .ds-preview {
+      flex: 1; overflow-y: auto; padding: 14px; border: 1px solid var(--border);
+      border-radius: 8px; font-family: 'Source Serif 4', serif; line-height: 1.6; display: none;
+    }
+    .desc-fullscreen-modal.preview-mode textarea { display: none; }
+    .desc-fullscreen-modal.preview-mode .ds-preview { display: block; }
+    .btn-expand {
+      background: none; border: 1px solid var(--border); color: var(--text-muted);
+      padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-left: 6px;
+    }
+    .btn-expand:hover { border-color: var(--coral); color: var(--coral); }
 
     .modal-actions {
       display: flex;
@@ -623,8 +648,8 @@
       <input type="text" id="edit-title" />
     </div>
     <div class="field">
-      <label>Description <button type="button" class="btn-preview" id="edit-description-preview" title="Preview as markdown">Preview</button></label>
-      <textarea id="edit-description" placeholder="Add notes or details..."></textarea>
+      <label>Description <button type="button" class="btn-preview" id="edit-description-preview" title="Preview as markdown">Preview</button><button type="button" class="btn-expand" id="edit-description-expand" title="Open fullscreen editor">&#9974; Expand</button></label>
+      <textarea id="edit-description" data-autogrow placeholder="Add notes or details..."></textarea>
     </div>
     <div class="field">
       <label>Priority</label>
@@ -654,6 +679,21 @@
     <div id="desc-view-body"></div>
     <div class="modal-actions">
       <button class="btn-cancel" id="desc-view-close">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Fullscreen description editor (hypothesis 1c375566) -->
+<div class="modal-overlay" id="desc-fullscreen-modal">
+  <div class="modal desc-fullscreen-modal" role="dialog" aria-modal="true" aria-label="Fullscreen description editor">
+    <h2>Description</h2>
+    <div class="ds-body">
+      <textarea id="desc-fullscreen-textarea" placeholder="Write notes, paste markdown, think out loud..."></textarea>
+      <div class="ds-preview" id="desc-fullscreen-preview"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-preview" id="desc-fullscreen-toggle" type="button">Preview</button>
+      <button class="btn-cancel" id="desc-fullscreen-close" type="button">Done</button>
     </div>
   </div>
 </div>
@@ -1229,6 +1269,96 @@
         viewModal.classList.remove('open');
       }
     });
+  })();
+
+  // Fullscreen description editor (hypothesis 1c375566) — modal-in-modal
+  // above the edit modal. Expand opens it, the textarea stays in sync with
+  // the edit-modal textarea, Preview toggles between edit and rendered view.
+  (function setupDescriptionFullscreen(){
+    const expandBtn = document.getElementById('edit-description-expand');
+    const fsModal = document.getElementById('desc-fullscreen-modal');
+    const fsTextarea = document.getElementById('desc-fullscreen-textarea');
+    const fsPreview = document.getElementById('desc-fullscreen-preview');
+    const toggleBtn = document.getElementById('desc-fullscreen-toggle');
+    const closeBtn = document.getElementById('desc-fullscreen-close');
+    const editTextarea = document.getElementById('edit-description');
+    if (!expandBtn || !fsModal || !fsTextarea || !fsPreview || !toggleBtn || !closeBtn || !editTextarea) return;
+
+    const fsInner = fsModal.querySelector('.modal');
+
+    function renderFsPreview(source) {
+      if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+        const pre = document.createElement('pre');
+        pre.textContent = source;
+        fsPreview.innerHTML = '';
+        fsPreview.appendChild(pre);
+        return;
+      }
+      fsPreview.innerHTML = DOMPurify.sanitize(marked.parse(source || ''));
+    }
+
+    function openFs() {
+      fsTextarea.value = editTextarea.value || '';
+      if (fsInner) fsInner.classList.remove('preview-mode');
+      toggleBtn.textContent = 'Preview';
+      fsModal.classList.add('open');
+      // Defer focus so iOS opens the keyboard predictably.
+      setTimeout(() => fsTextarea.focus(), 50);
+    }
+    function closeFs() {
+      // Sync back to the edit-modal textarea so Save picks up the changes.
+      editTextarea.value = fsTextarea.value;
+      // Also kick autogrow if it's wired on the underlying textarea.
+      editTextarea.dispatchEvent(new Event('input', { bubbles: true }));
+      fsModal.classList.remove('open');
+      if (fsInner) fsInner.classList.remove('preview-mode');
+    }
+
+    expandBtn.addEventListener('click', openFs);
+    closeBtn.addEventListener('click', closeFs);
+    fsModal.addEventListener('click', e => {
+      if (e.target === fsModal) closeFs();
+    });
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && fsModal.classList.contains('open')) closeFs();
+    });
+
+    toggleBtn.addEventListener('click', () => {
+      if (!fsInner) return;
+      const intoPreview = !fsInner.classList.contains('preview-mode');
+      if (intoPreview) {
+        renderFsPreview(fsTextarea.value);
+        fsInner.classList.add('preview-mode');
+        toggleBtn.textContent = 'Edit';
+      } else {
+        fsInner.classList.remove('preview-mode');
+        toggleBtn.textContent = 'Preview';
+        setTimeout(() => fsTextarea.focus(), 50);
+      }
+    });
+  })();
+
+  // Autogrow for the edit-modal description textarea (1c375566) — grows with
+  // content up to the viewport; users who prefer a fixed size can resize via
+  // the CSS `resize: vertical` handle.
+  (function setupDescriptionAutogrow(){
+    const el = document.getElementById('edit-description');
+    if (!el || !el.hasAttribute('data-autogrow')) return;
+    function grow() {
+      el.style.height = 'auto';
+      const maxH = Math.floor(window.innerHeight * 0.7);
+      const next = Math.min(el.scrollHeight + 2, maxH);
+      el.style.height = next + 'px';
+    }
+    el.addEventListener('input', grow);
+    // Run once after the edit modal opens (value is set then). A mutation
+    // observer is overkill; poll the open class.
+    const editModal = document.getElementById('edit-modal');
+    if (editModal) {
+      new MutationObserver(() => {
+        if (editModal.classList.contains('open')) setTimeout(grow, 20);
+      }).observe(editModal, { attributes: true, attributeFilter: ['class'] });
+    }
   })();
 
   document.getElementById('edit-drop').addEventListener('click', async () => {
