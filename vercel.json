@@ -1,4 +1,7 @@
 {
   "buildCommand": "node build.mjs",
-  "outputDirectory": "dist"
+  "outputDirectory": "dist",
+  "git": {
+    "deploymentEnabled": false
+  }
 }
