@@ -817,7 +817,7 @@
     );
     // Fetch overdue tasks (before today)
     const pastRes = fetch(
-      `${SB_URL}/rest/v1/tasks?select=*&status=eq.open&due_date=lt.${from}&order=due_date.asc,priority.asc`,
+      `${SB_URL}/rest/v1/tasks?select=*&status=eq.open&due_date=lt.${from}&order=priority.asc,created_at.asc`,
       { headers: sbHeaders() }
     );
     // Count undated tasks separately
