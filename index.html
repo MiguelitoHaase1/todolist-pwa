@@ -320,6 +320,20 @@
     .task-card:hover .drop-x { opacity: 1; }
     .drop-x:hover { color: var(--danger); }
 
+    /* Snooze (☾) greys a card in place until 05:00; next (★) marks the one card to do now. */
+    .snooze-btn, .next-btn { width: 26px; height: 26px; font-size: 15px; }
+    .snooze-btn[aria-pressed="true"], .next-btn[aria-pressed="true"] { color: var(--coral); }
+    .task-card.is-snoozed { opacity: 0.45; }
+    .task-card.is-next {
+      border: 2px solid var(--coral);
+      box-shadow: 0 0 0 3px var(--coral-light);
+    }
+    .task-card.is-next .task-title::before {
+      content: "Next · ";
+      color: var(--coral);
+      font-weight: 600;
+    }
+
     .task-card { cursor: pointer; }
 
     .empty-state {
@@ -849,6 +863,18 @@
     if (!res.ok) throw new Error(`Update failed: ${res.status}`);
   }
 
+  // One call moves the mark: the RPC clears the old next card and sets this
+  // one in a single transaction. null just clears it.
+  async function setNextTask(taskId) {
+    if (!SB_URL || !SB_KEY) return;
+    const res = await fetch(`${SB_URL}/rest/v1/rpc/set_next_task`, {
+      method: 'POST',
+      headers: sbHeaders(),
+      body: JSON.stringify({ p_id: taskId }),
+    });
+    if (!res.ok) throw new Error(`Next failed: ${res.status}`);
+  }
+
   async function createTask({ title, priority = 3, due_date, description = null }) {
     if (!SB_URL || !SB_KEY) return null;
     const res = await fetch(`${SB_URL}/rest/v1/tasks`, {
@@ -940,6 +966,36 @@
     return str.length > n ? str.slice(0, n) + '...' : str;
   }
 
+  // --- card state ---
+  /** The next 05:00 in Copenhagen strictly after `now`, as an ISO string. */
+  function snoozeUntil(now) {
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Europe/Copenhagen', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23',
+    });
+    const part = (d, type) => Number(fmt.formatToParts(d).find(p => p.type === type).value);
+    let day = Date.UTC(part(now, 'year'), part(now, 'month') - 1, part(now, 'day'));
+    if (part(now, 'hour') >= 5) day += 86400000;
+    // UTC+1 in winter, UTC+2 in summer; the clocks change before 05:00.
+    for (const offset of [1, 2]) {
+      const candidate = new Date(day + 5 * 3600000 - offset * 3600000);
+      if (part(candidate, 'hour') === 5) return candidate.toISOString();
+    }
+    return new Date(day + 4 * 3600000).toISOString();
+  }
+
+  function isSnoozed(snoozedUntil, now) {
+    if (!snoozedUntil) return false;
+    const until = new Date(snoozedUntil).getTime();
+    return Number.isFinite(until) && until > now.getTime();
+  }
+
+  /** Next wins over snooze: "do this now" can't also be "pay less attention". */
+  function cardStateClass(task, now) {
+    if (task.is_next === true) return ' is-next';
+    return isSnoozed(task.snoozed_until, now) ? ' is-snoozed' : '';
+  }
+  // --- end card state ---
+
   // ── Board ───────────────────────────────────────────────────────────────
   function buildBoard() {
     const board = document.getElementById('board');
@@ -949,6 +1005,8 @@
 
     for (const def of colDefs) {
       const colTasks = tasks.filter(t => t.due_date && def.match(t.due_date));
+      // The next card leads its column; sort is stable, so the rest keep fetch order.
+      colTasks.sort((a, b) => (b.is_next === true) - (a.is_next === true));
 
       // Hide past column when empty — no need for an empty overdue lane
       if (def.isPast && colTasks.length === 0) continue;
@@ -1007,7 +1065,7 @@
     const p = task.priority ?? 3;
     const hasDesc = task.description ? '<span class="desc-indicator" title="Has description">✎</span>' : '';
     return `
-      <div class="task-card" draggable="true" data-id="${task.id}">
+      <div class="task-card${cardStateClass(task, new Date())}" draggable="true" data-id="${task.id}">
         <button class="action-btn drop-x" title="Drop" data-id="${task.id}">✕</button>
         <div class="task-title">${escHtml(task.title)} ${hasDesc}</div>
         <div class="task-footer">
@@ -1017,6 +1075,8 @@
               <input type="date" class="move-date" data-id="${task.id}" value="${task.due_date || ''}" title="Move date" />
             </div>
             <span class="priority-pill pill-p${p}">${PRIORITY_LABELS[p]}</span>
+            <button class="action-btn snooze-btn" title="Snooze until tomorrow morning" aria-pressed="${isSnoozed(task.snoozed_until, new Date())}" data-id="${task.id}">☾</button>
+            <button class="action-btn next-btn" title="Do this next" aria-pressed="${task.is_next === true}" data-id="${task.id}">★</button>
           </div>
           <button class="action-btn done-btn" title="Done" data-id="${task.id}">✓</button>
         </div>
@@ -1111,6 +1171,49 @@
           await patchTask(id, { status: 'dropped' });
           emitEvent(id, 'status_changed', 'open', 'dropped');
         } catch { /* best effort */ }
+      });
+    });
+
+    // Snooze (☾) — tap to grey until 05:00, tap again to lift
+    document.querySelectorAll('.snooze-btn').forEach(btn => {
+      btn.addEventListener('click', async e => {
+        e.stopPropagation();
+        const task = tasks.find(t => t.id === btn.dataset.id);
+        if (!task) return;
+        const old = task.snoozed_until ?? null;
+        const next = isSnoozed(old, new Date()) ? null : snoozeUntil(new Date());
+        task.snoozed_until = next;
+        buildBoard();
+        toast(`<span class="toast-action">${next ? 'Snoozed till morning' : 'Unsnoozed'}</span><br><span class="toast-task">${truncate(task.title)}</span>`);
+        try {
+          await patchTask(task.id, { snoozed_until: next });
+        } catch {
+          toast('Failed — try again');
+          task.snoozed_until = old;
+          buildBoard();
+        }
+      });
+    });
+
+    // Next (★) — one card at a time; tap the next card again to clear it
+    document.querySelectorAll('.next-btn').forEach(btn => {
+      btn.addEventListener('click', async e => {
+        e.stopPropagation();
+        const task = tasks.find(t => t.id === btn.dataset.id);
+        if (!task) return;
+        const before = tasks.map(t => [t, t.is_next, t.snoozed_until]);
+        const target = task.is_next === true ? null : task.id;
+        for (const t of tasks) t.is_next = t.id === target;
+        if (target) task.snoozed_until = null; // the RPC lifts the snooze too
+        buildBoard();
+        toast(`<span class="toast-action">${target ? '★ Next' : 'Next cleared'}</span><br><span class="toast-task">${truncate(task.title)}</span>`);
+        try {
+          await setNextTask(target);
+        } catch {
+          toast('Failed — try again');
+          for (const [t, n, s] of before) { t.is_next = n; t.snoozed_until = s; }
+          buildBoard();
+        }
       });
     });
 
