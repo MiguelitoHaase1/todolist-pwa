@@ -26,7 +26,7 @@ function helpers() {
   const end = html.indexOf("// --- end card order ---");
   assert.ok(start !== -1 && end > start, "card order block not found");
   return new Function(
-    `${html.slice(start, end)}; return { orderColumn, dropIndex, reorderPatch, cyclePriority };`
+    `${html.slice(start, end)}; return { orderColumn, dropIndex, reorderPatch, landingPatches, cyclePriority };`
   )();
 }
 
@@ -157,6 +157,27 @@ describe("reorderPatch — a drop inside the same column", () => {
   it("clamps an index past the end to the bottom", () => {
     const { reorderPatch } = helpers();
     assert.deepEqual(reorderPatch(col, "a", 99).order, ["b", "c", "a"]);
+  });
+});
+
+describe("landingPatches — a card arrives in a column (new day or new P)", () => {
+  it("writes nothing when the column is still in pure P order", () => {
+    const { orderColumn, landingPatches } = helpers();
+    const ordered = orderColumn([t("a", 0), t("moved", 1), t("b", 2)]);
+    assert.deepEqual(landingPatches(ordered, "moved"), []);
+  });
+
+  it("pins the whole column at its slot when the column has hand-placed cards", () => {
+    // Without the pin, an unplaced card re-slots on every render, so it jumps
+    // when a card above it changes P. Seen in the browser check, 2026-11-16.
+    const { orderColumn, landingPatches } = helpers();
+    const ordered = orderColumn([
+      t("p3", 3, { sort_order: 1000 }),
+      t("p0", 0, { sort_order: 2000 }),
+      t("moved", 0),
+    ]);
+    assert.deepEqual(ids(ordered), ["p3", "p0", "moved"]);
+    assert.deepEqual(landingPatches(ordered, "moved"), [{ id: "moved", sort_order: 3000 }]);
   });
 });
 
