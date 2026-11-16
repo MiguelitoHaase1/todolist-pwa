@@ -204,7 +204,10 @@ describe("wiring", () => {
 
   it("every move to another date clears sort_order so the card re-slots by P", () => {
     // drag drop, the inline date input and the edit sheet all go through moveToDate
-    assert.match(html, /function moveToDate\([^)]*\)[\s\S]{0,800}sort_order: null/);
+    const start = html.indexOf("async function moveToDate(");
+    assert.ok(start !== -1, "moveToDate not found");
+    const body = html.slice(start, html.indexOf("\n  }\n", start));
+    assert.match(body, /patchTask\(id, \{ due_date: newDate, sort_order: null \}\)/);
     assert.ok((html.match(/moveToDate\(/g) || []).length >= 3, "moveToDate is not shared by the move paths");
   });
 
