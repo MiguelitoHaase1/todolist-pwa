@@ -334,7 +334,38 @@
       font-weight: 600;
     }
 
-    .task-card { cursor: pointer; }
+    .task-card { cursor: pointer; -webkit-touch-callout: none; }
+
+    /* Manual order: a coral line shows where a card dropped in its own day will land.
+       Pseudo-elements, so the marker never shifts the cards it sits between. */
+    .task-card.drop-before::before,
+    .task-card.drop-after::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 3px;
+      border-radius: 2px;
+      background: var(--coral);
+    }
+    .task-card.drop-before::before { top: -6px; }
+    .task-card.drop-after::after { bottom: -6px; }
+
+    /* Touch drag: the lifted copy that follows the finger */
+    .touch-ghost {
+      position: fixed;
+      z-index: 1000;
+      pointer-events: none;
+      opacity: 0.9;
+      box-shadow: var(--shadow);
+      transform: rotate(1.5deg);
+    }
+
+    button.priority-pill {
+      font-family: inherit;
+      line-height: inherit;
+      cursor: pointer;
+    }
 
     .empty-state {
       padding: 24px 16px;
@@ -996,17 +1027,84 @@
   }
   // --- end card state ---
 
+  // --- card order ---
+  /**
+   * One column's cards in display order (hypothesis 93a3635f). Cards Michael
+   * placed by hand (sort_order set) keep their order. Every other card — new,
+   * moved from another day, or re-prioritised — slots in right after the last
+   * card whose priority is equal or higher, oldest first. So a card starts at
+   * its P level, and he moves it from there. The next card always leads.
+   */
+  function orderColumn(list) {
+    const prio = t => t.priority ?? 3;
+    const placed = list.filter(t => t.sort_order != null).sort((a, b) => a.sort_order - b.sort_order);
+    const unplaced = list
+      .filter(t => t.sort_order == null)
+      .sort((a, b) => prio(a) - prio(b) || String(a.created_at ?? '').localeCompare(String(b.created_at ?? '')));
+    const colTasks = [...placed];
+    for (const card of unplaced) {
+      let at = 0;
+      colTasks.forEach((other, i) => { if (prio(other) <= prio(card)) at = i + 1; });
+      colTasks.splice(at, 0, card);
+    }
+    // The next card leads its column; sort is stable, so the rest keep their order.
+    colTasks.sort((a, b) => (b.is_next === true) - (a.is_next === true));
+    return colTasks;
+  }
+
+  /** How many of the other cards' vertical midpoints sit above the pointer. */
+  function dropIndex(midpoints, y) {
+    return midpoints.filter(m => m < y).length;
+  }
+
+  /**
+   * Move one card to `index` among the others and number the whole column
+   * 1000, 2000, … so every card in it is pinned. Returns only the rows whose
+   * number changed — those are the PATCHes to send.
+   */
+  function reorderPatch(ordered, id, index) {
+    const moved = ordered.find(t => t.id === id);
+    if (!moved) return { order: ordered.map(t => t.id), patches: [] };
+    const rest = ordered.filter(t => t.id !== id);
+    const at = Math.max(0, Math.min(index, rest.length));
+    const next = [...rest.slice(0, at), moved, ...rest.slice(at)];
+    const patches = [];
+    next.forEach((t, i) => {
+      const sortOrder = (i + 1) * 1000;
+      if (t.sort_order !== sortOrder) patches.push({ id: t.id, sort_order: sortOrder });
+    });
+    return { order: next.map(t => t.id), patches };
+  }
+
+  /**
+   * A card just landed in a column (new day or new P) and sits at its P slot.
+   * In a column Michael has ordered by hand, pin every card where it now sits,
+   * or the unplaced ones would shift whenever a card above them changes. A
+   * column still in pure P order can't drift, so it costs no writes.
+   */
+  function landingPatches(ordered, id) {
+    if (!ordered.some(t => t.sort_order != null)) return [];
+    return reorderPatch(ordered, id, ordered.findIndex(t => t.id === id)).patches;
+  }
+
+  /** Tapping the P pill: P0 → P1 → … → P4 → P0. */
+  function cyclePriority(p) {
+    return ((p ?? 3) + 1) % 5;
+  }
+  // --- end card order ---
+
   // ── Board ───────────────────────────────────────────────────────────────
   function buildBoard() {
+    // Redrawing mid touch drag would throw away the card the finger is on, and
+    // its touchmove/touchend would stop reaching us. Redraw when it lands.
+    if (touchDrag) { boardStale = true; return; }
     const board = document.getElementById('board');
     board.innerHTML = '';
 
     const colDefs = buildColumnDefs();
 
     for (const def of colDefs) {
-      const colTasks = tasks.filter(t => t.due_date && def.match(t.due_date));
-      // The next card leads its column; sort is stable, so the rest keep fetch order.
-      colTasks.sort((a, b) => (b.is_next === true) - (a.is_next === true));
+      const colTasks = orderColumn(tasks.filter(t => t.due_date && def.match(t.due_date)));
 
       // Hide past column when empty — no need for an empty overdue lane
       if (def.isPast && colTasks.length === 0) continue;
@@ -1021,7 +1119,7 @@
           </div>
           <span class="col-count">${colTasks.length}</span>
         </div>
-        <div class="col-tasks" data-date="${def.addDate}">
+        <div class="col-tasks" data-date="${def.addDate}" data-col="${def.id}">
           ${colTasks.length === 0
             ? '<div class="empty-state">No tasks</div>'
             : colTasks.map(taskCard).join('')}
@@ -1065,7 +1163,7 @@
     const p = task.priority ?? 3;
     const hasDesc = task.description ? '<span class="desc-indicator" title="Has description">✎</span>' : '';
     return `
-      <div class="task-card${cardStateClass(task, new Date())}" draggable="true" data-id="${task.id}">
+      <div class="task-card${cardStateClass(task, new Date())}" draggable="${!TOUCH_ONLY}" data-id="${task.id}">
         <button class="action-btn drop-x" title="Drop" data-id="${task.id}">✕</button>
         <div class="task-title">${escHtml(task.title)} ${hasDesc}</div>
         <div class="task-footer">
@@ -1074,7 +1172,7 @@
               <div class="move-icon">→</div>
               <input type="date" class="move-date" data-id="${task.id}" value="${task.due_date || ''}" title="Move date" />
             </div>
-            <span class="priority-pill pill-p${p}">${PRIORITY_LABELS[p]}</span>
+            <button class="priority-pill pill-p${p}" title="Tap to change priority" data-id="${task.id}">${PRIORITY_LABELS[p]}</button>
             <button class="action-btn snooze-btn" title="Snooze until tomorrow morning" aria-pressed="${isSnoozed(task.snoozed_until, new Date())}" data-id="${task.id}">☾</button>
             <button class="action-btn next-btn" title="Do this next" aria-pressed="${task.is_next === true}" data-id="${task.id}">★</button>
           </div>
@@ -1088,10 +1186,256 @@
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
+  // ── Manual order ────────────────────────────────────────────────────────
+  // A drop in the card's own column reorders it there. A drop anywhere else
+  // moves it to that column's date, where it starts at its P level.
+  function applyDrop(taskId, zone, clientY) {
+    const fromZone = document.querySelector(`.task-card[data-id="${taskId}"]`)?.closest('.col-tasks');
+    if (fromZone === zone) return reorderWithin(zone, taskId, dropSlot(zone, clientY, taskId));
+    return moveToDate(tasks.find(t => t.id === taskId), zone.dataset.date);
+  }
+
+  function dropSlot(zone, clientY, taskId) {
+    const others = [...zone.querySelectorAll('.task-card')].filter(c => c.dataset.id !== taskId);
+    return dropIndex(others.map(c => { const r = c.getBoundingClientRect(); return r.top + r.height / 2; }), clientY);
+  }
+
+  async function reorderWithin(zone, taskId, index) {
+    const ordered = [...zone.querySelectorAll('.task-card')]
+      .map(c => tasks.find(t => t.id === c.dataset.id))
+      .filter(Boolean);
+    await saveOrder(reorderPatch(ordered, taskId, index).patches, 'Reorder failed — reloading');
+  }
+
+  /** Pin a card that just landed, if its column is hand-ordered. */
+  function pinLanding(task) {
+    const def = buildColumnDefs().find(d => task.due_date && d.match(task.due_date));
+    if (!def) return;
+    const ordered = orderColumn(tasks.filter(t => t.due_date && def.match(t.due_date)));
+    return saveOrder(landingPatches(ordered, task.id), 'Saving order failed — reloading');
+  }
+
+  function saveOrder(patches, failMessage) {
+    if (patches.length === 0) return Promise.resolve();
+    for (const p of patches) tasks.find(t => t.id === p.id).sort_order = p.sort_order;
+    buildBoard();
+    return inOrder(async () => {
+      const results = await Promise.allSettled(patches.map(p => patchTask(p.id, { sort_order: p.sort_order })));
+      return results.some(r => r.status === 'rejected');
+    }).then(failed => {
+      if (!failed) return;
+      // Some rows may have saved and some not, so show what the database holds.
+      // Reload outside the queue: loadTasks saves pending pill taps through it.
+      toast(failMessage);
+      return loadTasks();
+    });
+  }
+
+  // Writes that touch card order go out one at a time, in the order they were
+  // made. Two quick reorders sent in parallel could land swapped, leaving the
+  // database with an order the screen never showed.
+  let orderWrites = Promise.resolve();
+  function inOrder(write) {
+    const run = orderWrites.then(write);
+    orderWrites = run.catch(() => {});
+    return run;
+  }
+
+  async function moveToDate(task, newDate) {
+    if (!task || !newDate || task.due_date === newDate) return;
+    const { id } = task;
+    const oldDate = task.due_date;
+    const oldOrder = task.sort_order ?? null;
+    task.due_date = newDate;
+    task.sort_order = null;
+    buildBoard();
+    const undo = () => {
+      const t = tasks.find(x => x.id === id);
+      if (!t) return;
+      t.due_date = oldDate;
+      t.sort_order = oldOrder;
+      buildBoard();
+      inOrder(() => patchTask(id, { due_date: oldDate, sort_order: oldOrder })).catch(() => {
+        toast('Undo failed — reloading');
+        loadTasks();
+      });
+    };
+    toast(`<span class="toast-action">Moved to ${friendlyDate(newDate)}</span><br><span class="toast-task">${truncate(task.title)}</span>`, undo);
+    try {
+      await inOrder(() => patchTask(id, { due_date: newDate, sort_order: null }));
+      emitEvent(id, 'deferred', oldDate, newDate);
+      await pinLanding(task);
+    } catch {
+      toast('Failed — reverting');
+      task.due_date = oldDate;
+      task.sort_order = oldOrder;
+      buildBoard();
+    }
+  }
+
+  // The coral line only shows for a drop in the card's own column: anywhere
+  // else the card lands at its P level, not under the pointer.
+  function showDropMarker(zone, clientY) {
+    clearDropMarker();
+    const id = draggedId ?? touchDrag?.id;
+    const own = document.querySelector(`.task-card[data-id="${id}"]`)?.closest('.col-tasks');
+    if (!id || own !== zone) return;
+    const others = [...zone.querySelectorAll('.task-card')].filter(c => c.dataset.id !== id);
+    if (others.length === 0) return;
+    const i = dropSlot(zone, clientY, id);
+    if (i < others.length) others[i].classList.add('drop-before');
+    else others[others.length - 1].classList.add('drop-after');
+  }
+
+  function clearDropMarker() {
+    document.querySelectorAll('.drop-before, .drop-after').forEach(c => c.classList.remove('drop-before', 'drop-after'));
+  }
+
+  const PRIORITY_SETTLE_MS = 1200;
+  const pendingPriority = new Map(); // task id → { from, fromOrder, to, timer }
+
+  /**
+   * Save a card's pill taps now. Runs when the taps settle, and early before a
+   * reload or the edit sheet, so neither works from a stale priority. The task
+   * is looked up by id because a reload swaps in fresh objects.
+   */
+  async function commitPriority(id) {
+    const pending = pendingPriority.get(id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingPriority.delete(id);
+    const task = tasks.find(t => t.id === id);
+    if (!task || pending.to === pending.from) return; // gone, or tapped all the way round
+    task.priority = pending.to;
+    task.sort_order = null;
+    buildBoard();
+    try {
+      await inOrder(() => patchTask(id, { priority: pending.to, sort_order: null }));
+      emitEvent(id, 'priority_changed', String(pending.from), String(pending.to));
+      await pinLanding(task);
+    } catch {
+      toast('Failed — reverting');
+      const t = tasks.find(x => x.id === id);
+      if (t) { t.priority = pending.from; t.sort_order = pending.fromOrder; buildBoard(); }
+    }
+  }
+
+  function commitAllPriorities() {
+    return Promise.all([...pendingPriority.keys()].map(commitPriority));
+  }
+
+  // ── Touch drag ──────────────────────────────────────────────────────────
+  // Hold a card still for LONG_PRESS_MS to lift it; a quicker swipe still
+  // scrolls the board. Once lifted, the card follows the finger and drops
+  // through the same applyDrop as the mouse.
+  const LONG_PRESS_MS = 350;
+  // On a phone the browser's own long-press drag would fight this one, so
+  // cards there aren't HTML5-draggable at all.
+  const TOUCH_ONLY = matchMedia('(hover: none) and (pointer: coarse)').matches;
+  let touchDrag = null; // { id, card, ghost, offsetX, offsetY, startX, startY, x, y, zone, frame, travelled }
+  let boardStale = false; // a redraw was held back during a touch drag
+  let suppressClick = false;
+
+  function attachTouchDrag(card) {
+    let timer = null;
+    let startX = 0;
+    let startY = 0;
+    const cancel = () => { clearTimeout(timer); timer = null; };
+    card.addEventListener('touchstart', e => {
+      if (e.touches.length !== 1 || e.target.closest('.action-btn, .move-wrap, .priority-pill')) return;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      timer = setTimeout(() => { timer = null; startTouchDrag(card, startX, startY); }, LONG_PRESS_MS);
+    }, { passive: true });
+    card.addEventListener('touchmove', e => {
+      const t = e.touches[0];
+      if (timer && Math.hypot(t.clientX - startX, t.clientY - startY) > 8) cancel();
+    }, { passive: true });
+    card.addEventListener('touchend', cancel, { passive: true });
+    card.addEventListener('touchcancel', cancel, { passive: true });
+    card.addEventListener('contextmenu', e => { if (touchDrag || timer) e.preventDefault(); });
+  }
+
+  function startTouchDrag(card, x, y) {
+    const rect = card.getBoundingClientRect();
+    const ghost = card.cloneNode(true);
+    ghost.classList.add('touch-ghost');
+    ghost.style.width = `${rect.width}px`;
+    document.body.appendChild(ghost);
+    card.classList.add('dragging');
+    touchDrag = { id: card.dataset.id, card, ghost, offsetX: x - rect.left, offsetY: y - rect.top, startX: x, startY: y, x, y, zone: null, frame: 0, travelled: false };
+    navigator.vibrate?.(10);
+    trackTouch(x, y);
+    touchDrag.frame = requestAnimationFrame(autoScrollTouch);
+  }
+
+  function trackTouch(x, y) {
+    Object.assign(touchDrag, { x, y });
+    if (Math.hypot(x - touchDrag.startX, y - touchDrag.startY) > 24) touchDrag.travelled = true;
+    touchDrag.ghost.style.left = `${x - touchDrag.offsetX}px`;
+    touchDrag.ghost.style.top = `${y - touchDrag.offsetY}px`;
+    const zone = document.elementFromPoint(x, y)?.closest('.col-tasks') ?? null;
+    if (zone !== touchDrag.zone) {
+      touchDrag.zone?.classList.remove('drag-over');
+      zone?.classList.add('drag-over');
+      touchDrag.zone = zone;
+    }
+    if (zone) showDropMarker(zone, y); else clearDropMarker();
+  }
+
+  // Near a screen edge, scroll so a card can reach a day that's off screen.
+  function autoScrollTouch() {
+    if (!touchDrag) return;
+    // Not before the finger has moved: a card lifted near the edge of the
+    // screen shouldn't send the board sliding off on its own.
+    if (!touchDrag.travelled) { touchDrag.frame = requestAnimationFrame(autoScrollTouch); return; }
+    const { x, y } = touchDrag;
+    // Measure against the visible screen: on a phone the layout can be far
+    // wider than what's shown, so innerWidth's edge is off screen.
+    const vv = window.visualViewport;
+    const left = vv?.offsetLeft ?? 0;
+    const top = vv?.offsetTop ?? 0;
+    const width = vv?.width ?? innerWidth;
+    const height = vv?.height ?? innerHeight;
+    const edge = 40;
+    const dx = x < left + edge ? -12 : x > left + width - edge ? 12 : 0;
+    const dy = y < top + edge + 60 ? -12 : y > top + height - edge ? 12 : 0;
+    if (dx || dy) {
+      window.scrollBy(dx, dy);
+      trackTouch(x, y);
+    }
+    touchDrag.frame = requestAnimationFrame(autoScrollTouch);
+  }
+
+  function endTouchDrag(dropped) {
+    const { id, card, ghost, zone, y, frame } = touchDrag;
+    touchDrag = null;
+    cancelAnimationFrame(frame);
+    ghost.remove();
+    card.classList.remove('dragging');
+    zone?.classList.remove('drag-over');
+    clearDropMarker();
+    suppressClick = true;
+    setTimeout(() => { suppressClick = false; }, 400);
+    const col = zone?.dataset.col;
+    if (boardStale) { boardStale = false; buildBoard(); }
+    // Look the column up again: a held-back redraw replaced the old element.
+    const target = col && document.querySelector(`.col-tasks[data-col="${col}"]`);
+    if (dropped && target) applyDrop(id, target, y);
+  }
+
+  document.addEventListener('touchmove', e => {
+    if (!touchDrag) return;
+    trackTouch(e.touches[0].clientX, e.touches[0].clientY);
+    e.preventDefault();
+  }, { passive: false });
+  document.addEventListener('touchend', () => { if (touchDrag) endTouchDrag(true); });
+  document.addEventListener('touchcancel', () => { if (touchDrag) endTouchDrag(false); });
+
   // ── Listeners ───────────────────────────────────────────────────────────
   function attachListeners() {
     // Drag
-    document.querySelectorAll('.task-card[draggable]').forEach(card => {
+    document.querySelectorAll('.task-card[draggable="true"]').forEach(card => {
       card.addEventListener('dragstart', e => {
         draggedId = card.dataset.id;
         card.classList.add('dragging');
@@ -1099,36 +1443,44 @@
       });
       card.addEventListener('dragend', () => {
         card.classList.remove('dragging');
+        clearDropMarker();
         draggedId = null;
       });
     });
 
     document.querySelectorAll('.col-tasks').forEach(zone => {
-      zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+      zone.addEventListener('dragover', e => {
+        e.preventDefault();
+        zone.classList.add('drag-over');
+        showDropMarker(zone, e.clientY);
+      });
       zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
-      zone.addEventListener('drop', async e => {
+      zone.addEventListener('drop', e => {
         e.preventDefault();
         zone.classList.remove('drag-over');
-        if (!draggedId) return;
-        const newDate = zone.dataset.date;
-        const task = tasks.find(t => t.id === draggedId);
-        if (!task || task.due_date === newDate) return;
-        const oldDate = task.due_date;
-        const tid = task.id;
-        task.due_date = newDate;
-        buildBoard();
-        toast(
-          `<span class="toast-action">Moved to ${friendlyDate(newDate)}</span><br><span class="toast-task">${truncate(task.title)}</span>`,
-          () => { const t = tasks.find(x => x.id === tid); if (t) { t.due_date = oldDate; buildBoard(); patchTask(tid, { due_date: oldDate }); } }
-        );
-        try {
-          await patchTask(tid, { due_date: newDate });
-          emitEvent(tid, 'deferred', oldDate, newDate);
-        } catch {
-          toast('Failed — reverting');
-          task.due_date = oldDate;
-          buildBoard();
-        }
+        clearDropMarker();
+        if (draggedId) applyDrop(draggedId, zone, e.clientY);
+      });
+    });
+
+    // Touch: HTML5 drag never fires for a finger, so a long press lifts the card
+    document.querySelectorAll('.task-card').forEach(attachTouchDrag);
+
+    // P pill — tap cycles P0 → P4. The card stays put while you tap; it
+    // re-slots at its new P level once you stop.
+    document.querySelectorAll('.priority-pill[data-id]').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const task = tasks.find(t => t.id === btn.dataset.id);
+        if (!task) return;
+        const pending = pendingPriority.get(task.id) ?? { from: task.priority ?? 3, fromOrder: task.sort_order ?? null };
+        clearTimeout(pending.timer);
+        task.priority = cyclePriority(task.priority);
+        pending.to = task.priority;
+        btn.className = `priority-pill pill-p${task.priority}`;
+        btn.textContent = PRIORITY_LABELS[task.priority];
+        pending.timer = setTimeout(() => commitPriority(task.id), PRIORITY_SETTLE_MS);
+        pendingPriority.set(task.id, pending);
       });
     });
 
@@ -1220,36 +1572,17 @@
     // Move date (inline date input on → arrow)
     document.querySelectorAll('.move-date').forEach(input => {
       input.addEventListener('click', e => e.stopPropagation());
-      input.addEventListener('change', async e => {
+      input.addEventListener('change', e => {
         e.stopPropagation();
-        const id = input.dataset.id;
-        const newDate = input.value;
-        if (!id || !newDate) return;
-        const task = tasks.find(t => t.id === id);
-        if (!task || task.due_date === newDate) return;
-        const oldDate = task.due_date;
-        const name = truncate(task.title);
-        task.due_date = newDate;
-        buildBoard();
-        toast(
-          `<span class="toast-action">Moved to ${friendlyDate(newDate)}</span><br><span class="toast-task">${name}</span>`,
-          () => { const t = tasks.find(x => x.id === id); if (t) { t.due_date = oldDate; buildBoard(); patchTask(id, { due_date: oldDate }); } }
-        );
-        try {
-          await patchTask(id, { due_date: newDate });
-          emitEvent(id, 'deferred', oldDate, newDate);
-        } catch {
-          toast('Failed — reverting');
-          task.due_date = oldDate;
-          buildBoard();
-        }
+        moveToDate(tasks.find(t => t.id === input.dataset.id), input.value);
       });
     });
 
     // Card body click → edit modal (skip if clicking a button or the date input)
     document.querySelectorAll('.task-card').forEach(card => {
       card.addEventListener('click', e => {
-        if (e.target.closest('.action-btn') || e.target.closest('.move-wrap')) return;
+        if (suppressClick) return; // the tap that ends a touch drag isn't an edit
+        if (e.target.closest('.action-btn') || e.target.closest('.move-wrap') || e.target.closest('.priority-pill')) return;
         openEditModal(card.dataset.id);
       });
     });
@@ -1329,6 +1662,7 @@
 
   // ── Edit Modal ──────────────────────────────────────────────────────────
   function openEditModal(taskId) {
+    commitPriority(taskId); // settle pill taps first, so the sheet shows and saves the real P
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
     editingId = taskId;
@@ -1529,11 +1863,15 @@
       emitEvent(editingId, 'priority_changed', String(task.priority), String(newPriority));
       updates.priority = newPriority;
       task.priority = newPriority;
+      updates.sort_order = null; // re-slot at the new P level
+      task.sort_order = null;
     }
     if (newDate && newDate !== task.due_date) {
       emitEvent(editingId, 'deferred', task.due_date, newDate);
       updates.due_date = newDate;
       task.due_date = newDate;
+      updates.sort_order = null; // a new day starts the card at its P level
+      task.sort_order = null;
     }
 
     document.getElementById('edit-modal').classList.remove('open');
@@ -1547,14 +1885,17 @@
       if ('priority' in updates) changes.push(`priority → P${updates.priority}`);
       if (updates.due_date) changes.push(`date → ${friendlyDate(updates.due_date)}`);
       toast(`<span class="toast-action">Saved</span> ${changes.join(', ')}<br><span class="toast-task">${truncate(task.title)}</span>`);
-      try { await patchTask(task.id, updates); }
-      catch { toast('Save failed'); }
+      try {
+        await inOrder(() => patchTask(task.id, updates));
+        if ('sort_order' in updates) await pinLanding(task);
+      } catch { toast('Save failed'); }
     }
   });
 
   // ── Load ────────────────────────────────────────────────────────────────
   async function loadTasks() {
     try {
+      await commitAllPriorities(); // or the reload would undo taps still settling
       tasks = await fetchTasks();
       buildBoard();
       if (!SB_URL) toast('Demo mode');
